@@ -1,191 +1,225 @@
-"""
-Candilyzer: AI-powered candidate analyzer for elite technical hiring.
-
-This Streamlit application leverages the Agno AI Agent Orchestration Framework to conduct
-forensic-level multi-candidate and single-candidate analysis using verified GitHub and LinkedIn data.
-
-Agents are powered by Nebius and enhanced with Agno’s GitHubTools, ExaTools, ThinkingTools,
-and ReasoningTools — enabling strict, professional-grade hiring decisions with full traceability.
-"""
-
-import re
-import yaml
+import os
+import io
 import streamlit as st
+from dotenv import load_dotenv
+from pypdf import PdfReader
+from google import genai
 
-from agno.agent import Agent
-from agno.models.nebius import Nebius
-from agno.tools.github import GithubTools
-from agno.tools.exa import ExaTools
-from agno.tools.thinking import ThinkingTools
-from agno.tools.reasoning import ReasoningTools
+load_dotenv()
 
-# Set wide layout
-st.set_page_config(layout="wide")
+st.set_page_config(
+    page_title="Candilyzer - CV & Applicant Screening Engine",
+    page_icon="📄",
+    layout="wide"
+)
 
-# Load YAML prompts
-@st.cache_data
-def load_yaml(file_path):
+# API Setup
+api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+
+CANDIDATE_MODELS = [
+    "gemini-3.6-flash",
+    "gemini-3.1-flash-lite",
+    "gemini-3.5-flash-lite",
+]
+
+
+def extract_text_from_pdf(pdf_file) -> str:
+    """Extracts plain text from an uploaded PDF file handle."""
     try:
-        with open(file_path, "r", encoding="utf-8") as file:
-            return yaml.safe_load(file)
-    except FileNotFoundError:
-        st.error("❌ YAML prompt file not found.")
-        st.stop()
-    except yaml.YAMLError as e:
-        st.error(f"❌ YAML parsing error: {e}")
-        st.stop()
+        reader = PdfReader(pdf_file)
+        full_text = []
+        for idx, page in enumerate(reader.pages):
+            page_text = page.extract_text()
+            if page_text:
+                full_text.append(page_text)
+        return "\n".join(full_text).strip()
+    except Exception as e:
+        return f"Error reading PDF file: {str(e)}"
 
-data = load_yaml("hiring_prompts.yaml")
-description_multi = data.get("description_for_multi_candidates", "")
-instructions_multi = data.get("instructions_for_multi_candidates", "")
-description_single = data.get("description_for_single_candidate", "")
-instructions_single = data.get("instructions_for_single_candidate", "")
 
-# Header
-st.markdown("""
-    <div style="text-align:center;">
-        <h1 style="font-size: 2.8rem;">🧠 Candilyzer</h1>
-        <p style="font-size:1.1rem;">Elite GitHub + LinkedIn Candidate Analyzer for Tech Hiring</p>
+def evaluate_applicant(client: genai.Client, job_title: str, jd_text: str, candidate_name: str, cv_text: str) -> str:
+    """Evaluates candidate CV against role requirements using structured dimensions."""
+    prompt = f"""
+    You are an executive talent screener and hiring manager evaluating an applicant.
+    
+    Target Role: {job_title}
+
+    Job Description & Requirements:
+    \"\"\"{jd_text.strip() if jd_text.strip() else "Standard industry qualifications and operational competency for this title."}\"\"\"
+
+    Candidate Identifier: {candidate_name}
+
+    Applicant CV Content:
+    \"\"\"{cv_text}\"\"\"
+
+    Conduct an objective, thorough evaluation across technical, operational, and practical qualifications.
+    Output a structured Markdown screening report formatted exactly as follows:
+
+    # 📄 Applicant Evaluation: {candidate_name}
+    **Target Role:** {job_title}  
+    **Match Alignment Score:** [Provide a bold score e.g. **84/100**]  
+    **Recruiter Verdict:** [SHORTLIST FOR INTERVIEW / HOLD AS BACKUP / REGRET]
+
+    ---
+
+    ## 1. 🎯 Executive Screening Summary
+    - Concise 2-3 sentence assessment of candidate fit, professional maturity, and core background relevance.
+
+    ## 2. 📋 Core Criteria & Qualifications Matrix
+    | Job Requirement / Competency | Candidate Demonstrated Experience | Match Status | Notes |
+    | :--- | :--- | :--- | :--- |
+    [List 5 to 7 key criteria extracted from the Job Description and assess whether the CV demonstrates direct, partial, or no evidence]
+
+    ## 3. 🌟 Standout Strengths & Direct Value-Add
+    - **Demonstrated Competency 1**: Concrete evidence and achievements from past roles.
+    - **Demonstrated Competency 2**: Transferable skills or tools relevant to this position.
+    - **Demonstrated Competency 3**: Operational or organizational execution depth.
+
+    ## 4. ⚠️ Gaps, Missing Prerequisites & Verification Flags
+    - Highlight missing certifications, unaddressed technical proficiencies, employment gaps, or vague responsibility claims.
+
+    ## 5. 🎙️ Tailored Interview Validation Questions
+    Provide 4 sharp, contextual interview questions designed to test claims made on the CV:
+    1. **[Core Execution Probe]**: Verify hands-on depth in a primary skill claimed.
+    2. **[Problem Solving / Crisis Probe]**: Situational question based on their past work environment.
+    3. **[Requirement Gap Probe]**: Directly target an area where the CV was weak or ambiguous.
+    4. **[Operational / Workflow Verification]**: Ask for specific metrics, tools, or procedures used in a prior role.
+
+    ## 6. 🏁 Hiring Recommendation & Next Action
+    - **Immediate Action**: Specific recommendation for HR / Hiring Committee (e.g. Schedule phone screen, request portfolio/references, or decline).
+    """
+
+    for model_name in CANDIDATE_MODELS:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+            )
+            if response.text:
+                return f"> *Analysis Engine: `{model_name}`*\n\n" + response.text
+        except Exception:
+            continue
+
+    return "### Error running applicant evaluation\nCould not connect to Gemini models. Check your API key and connection."
+
+
+# --- Streamlit UI Layout ---
+
+st.markdown(
+    """
+    <div style="padding: 0.5rem 0 1.2rem 0; border-bottom: 2px solid #f0f2f6; margin-bottom: 1.5rem;">
+        <h1 style="margin: 0; font-size: 2.2rem;">📄 Candilyzer: CV & Applicant Screening Engine</h1>
+        <p style="margin: 0.3rem 0 0 0; color: #555; font-size: 1.05rem;">
+            Automated PDF resume parser and candidate-to-job calibration engine for rapid recruitment shortlisting.
+        </p>
     </div>
-""", unsafe_allow_html=True)
+    """,
+    unsafe_allow_html=True
+)
 
-# Session state init
-for key in ["Nebius_api_key",  "model_id", "github_api_key", "exa_api_key"]:
-    if key not in st.session_state:
-        st.session_state[key] = ""
+with st.sidebar:
+    st.header("⚙️ Configuration")
+    user_key = st.text_input(
+        "Google Gemini API Key",
+        value=api_key or "",
+        type="password",
+        help="Reads from your .env file or enter one here."
+    )
+    if user_key:
+        api_key = user_key
 
-# Sidebar
-st.sidebar.title("🔑 API Keys & Navigation")
-st.sidebar.markdown("### Enter API Keys")
-st.session_state.Nebius_api_key = st.sidebar.text_input("Nebius API Key", value=st.session_state.Nebius_api_key, type="password")
-st.session_state.model_id = st.sidebar.text_input("Model ID", value=st.session_state.model_id)
-st.session_state.github_api_key = st.sidebar.text_input("GitHub API Key", value=st.session_state.github_api_key, type="password")
-st.session_state.exa_api_key = st.sidebar.text_input("Exa API Key", value=st.session_state.exa_api_key, type="password")
-st.sidebar.markdown("---")
-page = st.sidebar.radio("Select Page", ("Multi-Candidate Analyzer", "Single Candidate Analyzer"))
+    st.markdown("---")
+    st.subheader("📋 Evaluation Dimensions")
+    st.markdown(
+        """
+        - **Alignment Score**: Objective match against the specific JD
+        - **Criteria Matrix**: Requirement-by-requirement verification
+        - **Value-Add Strengths**: Documented achievements & direct impact
+        - **Flagged Gaps**: Missing qualifications, ambiguities, or risks
+        - **Interview Probes**: Targeted questions to verify CV claims
+        - **Hiring Verdict**: Shortlist, Hold, or Regret
+        """
+    )
+    st.markdown("---")
+    st.caption("Supports multi-page PDF CVs across operations, logistics, administration, IT, finance, and engineering.")
 
-# ---------------- Multi-Candidate Analyzer ---------------- #
-if page == "Multi-Candidate Analyzer":
-    st.header("Multi-Candidate Analyzer 🕵️‍♂️")
-    st.markdown("Enter multiple GitHub usernames (one per line) and a target job role.")
+if not api_key:
+    st.error("⚠️ Please provide a Google Gemini API Key in the sidebar or via your .env file.")
+    st.stop()
 
-    with st.form("multi_candidate_form"):
-        github_usernames = st.text_area("GitHub Usernames (one per line)", placeholder="username1\nusername2\n...")
-        job_role = st.text_input("Target Job Role", placeholder="e.g. Backend Engineer")
-        submit = st.form_submit_button("Analyze Candidates")
+gemini_client = genai.Client(api_key=api_key)
 
-    if submit:
-        if not github_usernames or not job_role:
-            st.error("❌ Please enter both usernames and job role.")
-        elif not all([st.session_state.Nebius_api_key, st.session_state.github_api_key, st.session_state.exa_api_key, st.session_state.model_id]):
-            st.error("❌ Please enter all API keys and model info in the sidebar.")
-        else:
-            usernames = [u.strip() for u in github_usernames.split("\n") if u.strip()]
-            if not usernames:
-                st.error("❌ Enter at least one valid GitHub username.")
-            else:
-                agent = Agent(
-                    description=description_multi,
-                    instructions=instructions_multi,
-                    model=Nebius(
-                        id=st.session_state.model_id,
-                        api_key=st.session_state.Nebius_api_key,
-                    ),
-                    name="StrictCandidateEvaluator",
-                    tools=[
-                        ThinkingTools(think=True, instructions="Strict GitHub candidate evaluation"),
-                        GithubTools(access_token=st.session_state.github_api_key),
-                        ExaTools(api_key=st.session_state.exa_api_key, include_domains=["github.com"], type="keyword"),
-                        ReasoningTools(add_instructions=True)
-                    ],
-                    markdown=True,
-                    show_tool_calls=True
+col_role, col_cv = st.columns([1, 1], gap="large")
+
+with col_role:
+    st.subheader("📌 1. Target Role & Requirements")
+    job_title = st.text_input(
+        "Job Title / Position",
+        value="Customs Logistics & Freight Operations Coordinator",
+        placeholder="e.g. Warehouse Supervisor, Accounts Officer, Python Developer"
+    )
+    
+    jd_input = st.text_area(
+        "Paste Job Description & Key Criteria (Must-haves & Nice-to-haves):",
+        value="""Key Responsibilities:
+- Manage customs clearance documentation, CARICOM invoices, and bills of lading.
+- Coordinate container transport logistics, warehouse receipting, and freight inspection schedules.
+- Liaison with customs brokerage agents, port authorities, and shipping lines.
+
+Must-Have Requirements:
+- Minimum 3-5 years hands-on experience in freight forwarding or import/export logistics.
+- Working knowledge of ASYCUDA World or regional customs clearance portals.
+- Strong organizational skills, spreadsheet proficiency, and document accuracy.""",
+        height=260,
+        placeholder="Paste requirements, certifications, required years of experience, and responsibilities..."
+    )
+
+with col_cv:
+    st.subheader("👤 2. Candidate Dossier")
+    candidate_name = st.text_input("Applicant Name / Tracking ID", value="Applicant 1")
+    
+    uploaded_pdf = st.file_uploader("Upload Candidate CV (PDF format)", type=["pdf"])
+    
+    pasted_cv = st.text_area(
+        "Or Paste CV / Resume Text Directly (Optional if PDF uploaded):",
+        height=180,
+        placeholder="If you don't have a PDF, paste resume text here..."
+    )
+
+st.markdown("---")
+if st.button("🚀 Analyze Applicant Fit", type="primary", use_container_width=True):
+    extracted_text = ""
+
+    if uploaded_pdf is not None:
+        with st.spinner("Extracting text from uploaded PDF..."):
+            extracted_text = extract_text_from_pdf(uploaded_pdf)
+    elif pasted_cv.strip():
+        extracted_text = pasted_cv.strip()
+
+    if not extracted_text:
+        st.warning("⚠️ Please upload a PDF CV or paste resume text to begin evaluation.")
+    elif not job_title.strip():
+        st.warning("⚠️ Please provide a target job title.")
+    else:
+        with st.spinner("Running deep candidate-to-role calibration..."):
+            report = evaluate_applicant(
+                client=gemini_client,
+                job_title=job_title,
+                jd_text=jd_input,
+                candidate_name=candidate_name,
+                cv_text=extracted_text
+            )
+
+            col_res_header, col_dl = st.columns([4, 1.2])
+            with col_res_header:
+                st.subheader("📊 Screening Dossier & Hiring Recommendation")
+            with col_dl:
+                st.download_button(
+                    label="📥 Download Report (.md)",
+                    data=report,
+                    file_name=f"{candidate_name.replace(' ', '_')}_screening_report.md",
+                    mime="text/markdown",
+                    use_container_width=True
                 )
 
-                st.markdown("### 🔎 Evaluation in Progress...")
-                with st.spinner("Running detailed analysis..."):
-                    query = f"Evaluate GitHub candidates for role '{job_role}': {', '.join(usernames)}"
-                    stream = agent.run(query, stream=True)
-
-                    output = ""
-                    block = st.empty()
-                    for chunk in stream:
-                        if hasattr(chunk, "content") and isinstance(chunk.content, str):
-                            output += chunk.content
-                            block.markdown(output, unsafe_allow_html=True)
-
-# ---------------- Single Candidate Analyzer ---------------- #
-elif page == "Single Candidate Analyzer":
-    st.header("Single Candidate Analyzer")
-    st.markdown("Analyze GitHub and optional LinkedIn profiles for a role.")
-
-    with st.form("single_candidate_form"):
-        col1, col2 = st.columns(2)
-        with col1:
-            github_username = st.text_input("GitHub Username", placeholder="e.g. Toufiq")
-            linkedin_url = st.text_input("LinkedIn Profile (Optional)", placeholder="https://linkedin.com/in/...")
-        with col2:
-            job_role = st.text_input("Job Role", placeholder="e.g. ML Engineer")
-        submit_button = st.form_submit_button("Analyze Candidate 🔥")
-
-    if submit_button:
-        if not github_username or not job_role:
-            st.error("GitHub username and job role are required.")
-        elif not all([st.session_state.Nebius_api_key, st.session_state.github_api_key, st.session_state.exa_api_key, st.session_state.model_id]):
-            st.error("❌ Please enter all API keys and model info.")
-        else:
-            try:
-                agent = Agent(
-                    model=Nebius(
-                        id=st.session_state.model_id,
-                        api_key=st.session_state.Nebius_api_key,
-                    ),
-                    name="Candilyzer",
-                    tools=[
-                        ThinkingTools(add_instructions=True),
-                        GithubTools(access_token=st.session_state.github_api_key),
-                        ExaTools(
-                            api_key=st.session_state.exa_api_key,
-                            include_domains=["linkedin.com", "github.com"],
-                            type="keyword",
-                            text_length_limit=2000,
-                            show_results=True
-                        ),
-                        ReasoningTools(add_instructions=True)
-                    ],
-                    description=description_single,
-                    instructions=instructions_single,
-                    markdown=True,
-                    show_tool_calls=True,
-                    add_datetime_to_instructions=True
-                )
-
-                st.markdown("### 🤖 AI Evaluation in Progress...")
-                with st.spinner("Analyzing candidate..."):
-                    input_text = f"GitHub: {github_username}, Role: {job_role}"
-                    if linkedin_url:
-                        input_text += f", LinkedIn: {linkedin_url}"
-
-                    response_stream = agent.run(
-                        f"Analyze candidate for {job_role}. {input_text}. Provide score and detailed report.",
-                        stream=True
-                    )
-
-                    full_response = ""
-                    placeholder = st.empty()
-                    for chunk in response_stream:
-                        if hasattr(chunk, "content") and isinstance(chunk.content, str):
-                            full_response += chunk.content
-                            placeholder.markdown(full_response, unsafe_allow_html=True)
-
-                    match = re.search(r"\b([1-9]?\d|100)/100\b", full_response)
-                    if match:
-                        score = int(match.group(1))
-                        st.success(f"🎯 Candidate Score: {score}/100")
-
-            except (ValueError, KeyError, ConnectionError) as e:
-                st.error(f"❌ Known error: {e}")
-            except Exception as e:
-                st.error("❌ Unexpected error occurred.")
-                st.exception(e)
-
+            st.markdown(report)
