@@ -1,181 +1,103 @@
-import asyncio
-import prompts
 import os
-from IPython.display import display, Markdown
+import time
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field
-from google.adk.agents.llm_agent import LlmAgent
-from google.adk.agents.sequential_agent import SequentialAgent
-from google.adk.models.lite_llm import LiteLlm
-from google.adk.sessions import InMemorySessionService
-from google.adk.runners import Runner
-from google.genai import types
-from google.adk.tools.langchain_tool import LangchainTool
-from langchain_tavily import TavilySearch
-
+from google import genai
 
 load_dotenv()
 
-NEBIUS_LLM = LiteLlm(
-    model="nebius/Qwen/Qwen3-235B-A22B-Instruct-2507",
-    api_key=os.getenv("NEBIUS_API_KEY")
-)
+api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+if not api_key:
+    raise ValueError("Google API Key not found. Please set GOOGLE_API_KEY in your .env file.")
 
-tavily_tool_instance = TavilySearch(
-    max_results=3,
-    search_depth="basic",
-    include_answer=True,
-    include_raw_content=False,
-    include_images=False,
-)
+client = genai.Client(api_key=api_key)
 
-tavily_search = LangchainTool(tool=tavily_tool_instance)
-
-idea_clarifier_agent = LlmAgent(
-    name="IdeaClarifierAgent",
-    model=NEBIUS_LLM,
-    instruction=prompts.IDEA_PROMPT,
-    description="Helps clarify and refine the startup idea.",
-    # output_schema=IdeaClarification,
-    output_key="clarified_idea"
-)
+# Primary model and resilient fallback models
+CANDIDATE_MODELS = [
+    "gemini-3.6-flash",
+    "gemini-3.1-flash-lite",
+    "gemini-3.5-flash-lite",
+]
 
 
-market_research_agent = LlmAgent(
-    name="MarketResearchAgent",
-    model=NEBIUS_LLM,
-    instruction=prompts.MARKET_RESEARCH_PROMPT,
-    description="Conducts market research for the startup idea.",
-    tools=[tavily_search],
-    # output_schema=MarketResearch,
-    output_key="market_research"
-)
-
-
-
-competitor_analysis_agent = LlmAgent(
-    name="CompetitorAnalysisAgent",
-    model=NEBIUS_LLM,
-    instruction=prompts.COMPETITOR_ANALYSIS_PROMPT,
-    description="Conducts competitor analysis for the startup idea.",
-    tools=[tavily_search],
-    # output_schema=CompetitorAnalysis,
-    output_key="competitor_analysis"
-)
-
-report_agent = LlmAgent(
-    name="ReportAgent",
-    model=NEBIUS_LLM,
-    instruction=prompts.REPORT_PROMPT,
-    description="Generates a report based on the analysis findings.",
-    # output_schema=ValidationReport,
-    output_key="validation_report"
-)
-
-print(f"📝 Generating comprehensive validation report...")
-
-
-startup_validation_agent = SequentialAgent(
-    name="StartupValidationAgent",
-    sub_agents=[
-        idea_clarifier_agent,
-        market_research_agent,
-        competitor_analysis_agent,
-        report_agent
-    ],
-    description="Validates startup ideas through a structured analysis process."
-
-)
-
-APP_NAME = "startup_validator"
-USER_ID = "arindam_1729"
-SESSION_ID = "startup_validation_session"
-
-async def run_validation(idea: str):
-
-    initial_state = {"idea": idea}
-    session_service = InMemorySessionService()
-    await session_service.create_session(app_name=APP_NAME, user_id=USER_ID, session_id=SESSION_ID, state=initial_state)
-
-    runner = Runner(
-        agent=startup_validation_agent,
-        app_name=APP_NAME,
-        session_service=session_service
-    )
+def run_validation(idea: str) -> str:
+    """
+    Validates a startup concept across market sizing, competitive moats,
+    revenue models, risks, and next steps with multi-model fallback.
+    """
+    prompt = f"""
+    You are a venture capitalist and startup strategist conducting a rigorous due-diligence assessment.
     
-    content = types.Content(role="user", parts=[types.Part(text=idea)])
-    events = runner.run(user_id=USER_ID, session_id=SESSION_ID, new_message=content )
-    for event in events:
-        if event.is_final_response():
-            formatted_output = f"{event.content.parts[0].text}"
-            print(formatted_output)
-            # display(Markdown(formatted_output))
-            # return formatted_output
+    Startup Idea:
+    "{idea}"
 
-    session = await session_service.get_session(app_name=APP_NAME, user_id=USER_ID, session_id=SESSION_ID)
+    Provide a complete, deeply detailed Startup Validation Report formatted in Markdown.
+    
+    Structure your report with the following sections:
 
+    # 🚀 Startup Idea Validation: {idea}
 
-    import ast
-    def safe_parse(val):
-        if isinstance(val, dict):
-            return val
-        try:
-            return ast.literal_eval(val)
-        except Exception:
-            return {}
+    ## 1. 💡 Concept Refinement & Value Proposition
+    - **Core Problem Statement**: Specific pain points being addressed.
+    - **Target Customer Archetype**: Who feels this pain most acutely?
+    - **Unique Value Proposition (UVP)**: Why this solution is 10x better than existing workflows.
 
-    clarified_idea = safe_parse(session.state.get('clarified_idea', {}))
-    market_research = safe_parse(session.state.get('market_research', {}))
-    competitor_analysis = safe_parse(session.state.get('competitor_analysis', {}))
-    validation_report = safe_parse(session.state.get('validation_report', {}))
+    ## 2. 📊 Market Opportunity & Sizing
+    - **Total Addressable Market (TAM)**: Industry scale and trajectory.
+    - **Serviceable Addressable Market (SAM)**: Reachable initial market.
+    - **Target Customer Segments**: Primary, secondary, and niche early adopters.
+    - **Current Market Drivers & Headwinds**: Tailwinds accelerating adoption and risks slowing it down.
 
-    summary = f"""
-🎉 **STARTUP IDEA VALIDATION COMPLETED!**
+    ## 3. 🛡️ Competitive Landscape & Defensibility
+    - **Direct Competitors**: Incumbents and emerging startups in this space.
+    - **Indirect / Substitute Competitors**: Existing manual workflows or spreadsheet hacks.
+    - **Competitive Moat**: Data flywheels, network effects, proprietary tech, or high switching costs.
 
-## 📊 Validation Summary
+    ## 4. 💰 Revenue Model & Unit Economics
+    - **Monetization Mechanics**: Pricing models (SaaS tiers, usage-based, transaction fee, enterprise licensing).
+    - **Estimated CAC vs. LTV Dynamics**: Expected customer acquisition dynamics.
 
-- **Startup Idea:** {idea}
-- **Idea Clarification:** ✅ Completed
-- **Market Research:** ✅ Completed
-- **Competitor Analysis:** ✅ Completed
-- **Final Report:** ✅ Generated
+    ## 5. ⚠️ Critical Risks & Pre-Mortem Analysis
+    - **Adoption / Distribution Risk**: Why customers might hesitate to onboard.
+    - **Technical / Operational Risk**: Feasibility and execution bottlenecks.
+    - **Mitigation Strategies**: Actionable tactics to de-risk each factor.
 
-## 📈 Key Market Insights
+    ## 6. 🏁 Strategic Verdict & Next Steps
+    - **Validation Verdict**: (Proceed, Pivot, or Abandon) with reasoning.
+    - **Week 1-4 Action Checklist**: Low-cost MVP and customer discovery tests to execute immediately.
 
-- **TAM:** {market_research.get('total_addressable_market', '')}
-- **Target Segments:** {market_research.get('target_customer_segments', '')}
+    ---
+    *Disclaimer: This assessment is generated for strategic planning and validation purposes.*
+    """
 
-## 🏆 Competitive Positioning
+    last_error = ""
 
-{competitor_analysis.get('positioning', '')}
+    for model_name in CANDIDATE_MODELS:
+        for attempt in range(2):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                )
+                if response.text:
+                    return f"> *Model used: `{model_name}`*\n\n" + response.text
 
----
+            except Exception as e:
+                err_str = str(e)
+                last_error = err_str
 
-## 📋 Comprehensive Validation Report
+                # If it's a 503 high-demand spike, sleep 3s then try fallback model
+                if "503" in err_str or "UNAVAILABLE" in err_str:
+                    time.sleep(3)
+                    continue
 
-{validation_report.get('executive_summary', '')}
+                # If quota limit hit, pass to next attempt
+                if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                    time.sleep(5)
+                    continue
 
-{validation_report.get('idea_assessment', '')}
-
-{validation_report.get('market_opportunity', '')}
-
-{validation_report.get('competitive_landscape', '')}
-
-{validation_report.get('recommendations', '')}
-
-{validation_report.get('next_steps', '')}
-
----
-
-> ⚠️ *Disclaimer: This validation is for informational purposes only. Conduct additional due diligence before making investment decisions.*
-
-"""
-    # display(Markdown(summary))
-    print(summary)
-
-    return summary
+    return f"### Error running validation\n\n`{last_error}`"
 
 
 if __name__ == "__main__":
-    asyncio.run(run_validation("A CodeReview Agent that reviews your code in each PR"))
-    
+    test_idea = "A local micro-warehouse tracking app for container freight clearance and pallet management"
+    print(run_validation(test_idea))
