@@ -1,137 +1,158 @@
-import streamlit as st
 import os
-import asyncio
+import streamlit as st
 from dotenv import load_dotenv
-import base64
-from main import workflow
-from agno.run.workflow import WorkflowRunEvent
-import nest_asyncio
-
-nest_asyncio.apply()
-
-st.set_page_config(page_title="Meeting Assistant Agent", layout="wide")
+from google import genai
+from google.genai import types
 
 load_dotenv()
 
-with open("./assets/Nebius.png", "rb") as nebius_file:
-    nebius_base64 = base64.b64encode(nebius_file.read()).decode()
-
-with open("./assets/agno.png", "rb") as agno_file:
-    agno_base64 = base64.b64encode(agno_file.read()).decode()
-
-# Create title with embedded image
-title_html = f"""
-<div style="display: flex;  width: 100%; ">
-    <h1 style="margin: 0; padding: 0; font-size: 2.5rem; font-weight: bold;">
-        <span style="font-size:2.5rem;">📝</span> Meeting Assistant Agent with
-        <img src="data:image/png;base64,{agno_base64}" style="height: 80px; vertical-align: middle; bottom: 10px;"/>
-    </h1>
-</div>
-"""
-st.markdown(title_html, unsafe_allow_html=True)
-st.markdown(
-    "**Streamline your meetings with AI-powered transcription, task creation, and notifications**"
+st.set_page_config(
+    page_title="AI Meeting Assistant",
+    page_icon="🎙️",
+    layout="wide"
 )
 
+st.title("🎙️ AI Meeting Assistant")
+st.caption("Powered by Google Gemini | Multimodal Audio, Transcripts & Action Matrix")
+
+api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+
+# Initialize Gemini Client
+client = genai.Client(api_key=api_key) if api_key else None
+
 with st.sidebar:
-    st.image("./assets/Nebius.png", width=150)
-    nebius_key = st.text_input(
-        "Enter your Nebius API key",
-        value=os.getenv("NEBIUS_API_KEY", ""),
-        type="password",
-    )
-
-    slack_key = st.text_input(
-        "Enter your Slack Bot Token",
-        value=os.getenv("SLACK_BOT_TOKEN", ""),
-        type="password",
-    )
-
-    linear_key = st.text_input(
-        "Enter your Linear API key",
-        value=os.getenv("LINEAR_API_KEY", ""),
-        type="password",
-    )
-
-    if st.button("Save Keys", use_container_width=True):
-        if nebius_key:
-            os.environ["NEBIUS_API_KEY"] = nebius_key
-        if slack_key:
-            os.environ["SLACK_BOT_TOKEN"] = slack_key
-        if linear_key:
-            os.environ["LINEAR_API_KEY"] = linear_key
-        st.success("API keys saved successfully!")
-
-    uploaded_file = st.file_uploader(
-        "Upload Meeting Notes", accept_multiple_files="false", type=["txt"]
-    )
-
-    if uploaded_file:
-        with open(f"./{uploaded_file.name}", "wb") as f:
-            f.write(uploaded_file.getbuffer())
-        st.success("File uploaded successfully!")
-
-    meet_processing = st.button("Process Meeting Notes")
+    st.header("⚙️ Configuration")
+    if api_key:
+        st.success("API Key detected from environment")
+    else:
+        user_key = st.text_input("Enter Google Gemini API Key", type="password")
+        if user_key:
+            client = genai.Client(api_key=user_key)
+            st.success("Key applied!")
 
     st.markdown("---")
-    st.markdown(
-        "Developed with ❤️ by [Arindam Majumder](https://www.youtube.com/c/Arindam_1729)"
+    st.markdown("### Input Source")
+    input_mode = st.radio(
+        "Choose Input Method:",
+        [
+            "Upload Audio / Voice Note (MP3, WAV, M4A)",
+            "Record Voice Note (Microphone)",
+            "Use Sample File (meeting_notes.txt)",
+            "Upload Text File (.txt)",
+            "Paste Text"
+        ]
     )
 
-about_md = """
-## About
+    audio_bytes = None
+    audio_mime = None
+    text_content = ""
 
-This application is powered by a set of advanced AI agents for meeting assistance:
+    if input_mode == "Upload Audio / Voice Note (MP3, WAV, M4A)":
+        uploaded_audio = st.file_uploader("Upload Audio", type=["mp3", "wav", "m4a", "ogg"])
+        if uploaded_audio:
+            audio_bytes = uploaded_audio.read()
+            audio_mime = uploaded_audio.type or "audio/mp3"
+            st.audio(audio_bytes, format=audio_mime)
+            st.success("Audio file loaded!")
 
-- **Meeting Transcription**: Transcribes meeting notes into a clean summary.
-- **Task Creation**: Generates actionable tasks in Linear based on meeting discussions.
-- **Slack Notifications**: Sends summaries and key decisions to your Slack channel.
+    elif input_mode == "Record Voice Note (Microphone)":
+        recorded_audio = st.audio_input("Record a meeting memo or note")
+        if recorded_audio:
+            audio_bytes = recorded_audio.read()
+            audio_mime = recorded_audio.type or "audio/wav"
+            st.audio(audio_bytes, format=audio_mime)
+            st.success("Recording captured!")
 
-Each stage leverages state-of-the-art language models and tools to enhance productivity and communication.
+    elif input_mode == "Use Sample File (meeting_notes.txt)":
+        if os.path.exists("meeting_notes.txt"):
+            with open("meeting_notes.txt", "r", encoding="utf-8") as f:
+                text_content = f.read()
+            st.info("Loaded default `meeting_notes.txt`")
+        else:
+            st.error("meeting_notes.txt not found in folder.")
 
+    elif input_mode == "Upload Text File (.txt)":
+        uploaded_file = st.file_uploader("Upload Notes", type=["txt"])
+        if uploaded_file:
+            text_content = uploaded_file.read().decode("utf-8")
+            st.success("File uploaded successfully!")
+
+    process_btn = st.button("🚀 Process Meeting", type="primary", use_container_width=True)
+
+# Main screen paste box if selected
+if input_mode == "Paste Text":
+    text_content = st.text_area("Paste meeting transcript or notes here:", height=200)
+
+PROMPT_INSTRUCTIONS = """
+You are an executive scribe and meeting intelligence assistant.
+Analyze the provided meeting input (which may be raw audio, voice notes, or text transcript).
+
+Produce a clear, structured executive document containing:
+1. Complete Transcript / Detailed Breakdown of all discussion points, technical scope, and budgets.
+2. Executive Summary (High-level goals and context).
+3. Decisions Matrix (Markdown table: Decision | Details).
+4. Assigned Tasks Matrix (Markdown table: Task | Owner/Assignee | Deadline).
+5. Immediate Next Steps.
 """
 
-summary = None
-
-
-async def stream_meeting_summary(file_path, status):
-    # Correct import
-    # Correct import
-
-    response = await workflow.arun(
-        message=f"Process the meeting notes from {file_path}: summarize, create Linear tasks, and send a Slack notification with key outcomes.",
-        markdown=True,
-        stream=True,
-        stream_intermediate_steps=True,
-    )
-
-    content = ""
-    async for event in response:
-        if event.event == "StepStarted":
-            status.update(label=f"🚀 Step started: {event.step_name}")
-        elif event.event == "StepCompleted":
-            status.update(label=f"✅ Step completed: {event.step_name}")
-        elif event.event == "ParallelExecutionStarted":
-            status.update(label=f"🔄 Parallel execution started: {event.step_name}")
-        elif event.event == "ParallelExecutionCompleted":
-            status.update(label=f"✅ Parallel execution completed: {event.step_name}")
-        elif event.event == WorkflowRunEvent.workflow_completed.value:
-            content = event.content
-    return content
-
-
-if meet_processing:
-    if uploaded_file:
-        with st.status("Processing meeting notes...", expanded=True) as status:
-            summary = asyncio.run(
-                stream_meeting_summary(f"./{uploaded_file.name}", status)
-            )
-            status.update(label="Processing complete!", state="complete")
-        if summary:
-            st.markdown(summary)
-            
+if process_btn:
+    if not client:
+        st.error("Please provide a valid Google Gemini API Key.")
+    elif not audio_bytes and not text_content.strip():
+        st.warning("Please provide an audio recording, uploaded file, or text input before processing.")
     else:
-        st.warning("Please enter your meeting notes before processing.")
+        with st.status("Gemini is listening and processing...", expanded=True) as status:
+            try:
+                contents = []
+                
+                # If audio input is supplied, attach it directly as inline binary parts
+                if audio_bytes:
+                    st.write("🎙️ Feeding raw audio directly into Gemini...")
+                    contents.append(
+                        types.Part.from_bytes(
+                            data=audio_bytes,
+                            mime_type=audio_mime
+                        )
+                    )
+                
+                # If text notes are supplied
+                if text_content.strip():
+                    st.write("📝 Ingesting text notes...")
+                    contents.append(text_content)
 
-if not summary:
-    st.markdown(about_md)
+                contents.append(PROMPT_INSTRUCTIONS)
+
+                st.write("🧠 Generating transcript, decision matrix, and action plan...")
+                response = client.models.generate_content(
+                    model="gemini-3.6-flash",
+                    contents=contents,
+                )
+
+                output_markdown = response.text
+
+                # Save report locally
+                with open("meeting_summary.md", "w", encoding="utf-8") as f:
+                    f.write(output_markdown)
+
+                status.update(label="Processing complete!", state="complete")
+
+                # Display Results
+                st.markdown("---")
+                st.markdown(output_markdown)
+
+                st.download_button(
+                    label="📥 Download meeting_summary.md",
+                    data=output_markdown,
+                    file_name="meeting_summary.md",
+                    mime="text/markdown"
+                )
+
+            except Exception as e:
+                status.update(label="Execution encountered an error", state="error")
+                st.error(f"Error processing input: {e}")
+
+else:
+    st.info("Choose your audio file, mic recording, or text in the sidebar, then click **Process Meeting**.")
+    if text_content:
+        with st.expander("Preview Selected Text"):
+            st.text(text_content[:800] + ("..." if len(text_content) > 800 else ""))

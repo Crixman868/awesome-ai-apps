@@ -1,145 +1,89 @@
 import os
-from typing import AsyncIterator, Iterator
+import time
 from agno.agent import Agent
-from agno.tools.slack import SlackTools
-from agno.tools.linear import LinearTools
-from agno.tools.file import FileTools
-from agno.workflow import Step, Workflow
-from agno.run.workflow import WorkflowRunOutputEvent, WorkflowRunEvent
-from agno.workflow.parallel import Parallel
-from agno.models.nebius import Nebius
+from agno.models.google import Gemini
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
 
-model = Nebius(id="moonshotai/Kimi-K2-Instruct", api_key=os.getenv("NEBIUS_API_KEY"))
+api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+if not api_key:
+    raise ValueError("API key not found. Please set GOOGLE_API_KEY in your .env file.")
 
+# Read meeting notes directly
+notes_file = "meeting_notes.txt"
+if os.path.exists(notes_file):
+    with open(notes_file, "r", encoding="utf-8") as f:
+        notes_content = f.read()
+else:
+    notes_content = "No meeting notes found."
 
-slack_tools = SlackTools(token=os.getenv("SLACK_BOT_TOKEN"))
-linear_tools = LinearTools(api_key=os.getenv("LINEAR_API_KEY"))
-file_tools = FileTools()
+# Initialize Gemini
+model = Gemini(id="gemini-3.6-flash", api_key=api_key)
 
+def run_agent_with_retry(agent, prompt, max_retries=3, delay=3):
+    """Executes an agent run with backoff on transient errors."""
+    for attempt in range(max_retries):
+        try:
+            response = agent.run(prompt)
+            # Agno returns an object; check if error text slipped through
+            resp_text = str(response.content if hasattr(response, "content") else response)
+            if "503" in resp_text or "UNAVAILABLE" in resp_text:
+                raise RuntimeError(f"Transient 503 detected: {resp_text}")
+            return response
+        except Exception as e:
+            if attempt == max_retries - 1:
+                raise e
+            print(f"Warning: Attempt {attempt + 1} encountered an issue ({e}). Retrying in {delay * (2 ** attempt)}s...")
+            time.sleep(delay * (2 ** attempt))
 
-linear_agent = Agent(
-    name="Linear Task Agent",
+# Agent 1: Analyzes and creates detailed summary
+transcription_agent = Agent(
+    name="Meeting Analysis Agent",
     model=model,
-    tools=[linear_tools],
     instructions=(
-        "You are a productivity assistant. "
-        "Your job is to create clear, actionable tasks in Linear based on meeting notes or summaries."
-        "For each action item, include a concise title, detailed description, assignee, and deadline if specified. "
-        "Reference specific decisions and responsibilities from the meeting notes. "
-        "If priorities or deadlines are mentioned, include them."
+        "You are an expert executive scribe. Analyze the provided meeting notes. "
+        "Extract key discussion points, technical decisions, cost structures, and deadlines, "
+        "and produce a comprehensive, structured markdown summary."
     ),
     markdown=True,
 )
 
-slack_agent = Agent(
-    name="Slack Notification Agent",
-    tools=[slack_tools],
-    model=model,
-    instructions=(
-        "You are a communication assistant. "
-        "Send a friendly, informative Slack message to the #agent-chat channel summarizing the meeting outcomes. "
-        "Highlight key decisions, assigned tasks (with assignees and deadlines), pricing strategy ($10,000 charge, $2,000 build cost), "
-        "and next steps. Use bullet points for clarity and mention any upcoming meetings or deadlines.\n\n"
-        "Example message:\n"
-        
-        "Hey team! Here's a quick recap of our key decisions from today's session:"
-        "🎯 Key Decisions:"
-        "• Pricing set at $10,000.\n"
-        "• Build cost approved for $2,000.\n\n"
-        "📋 Assigned Tasks:\n"
-        "• Set up repo: Assigned to Alice, due by 2025-09-20.\n"
-        "• Draft proposal: Assigned to Bob, due by 2025-09-18.\n\n"
-        "🚴‍♂️ Next Steps:"
-        "\n"
-        "• Schedule follow-up meeting.\n"
-        "• Finalize requirements with the client."
-        "You'll find the tasks in Linear. Let's keep the momentum going! 🚀"
-    ),
-)
-
-meeting_task_agent = Agent(
-    name="Meeting Transcription Agent",
-    tools=[file_tools],
-    model=model,
-    instructions=(
-        "You are a meeting transcription assistant. You'll find the meeting notes at {file_path}. (only read this file, Don't modify it) "
-        "Transcribe the provided meeting notes into a clean, readable summary. "
-        "Capture all important discussion points, including project goals, cost estimates, product tiers, pricing strategy, technical stack, timeline, "
-        "decisions, and assigned tasks with deadlines. Format the summary with clear headings and bullet points for easy reading."
-        "Write the summary in ./meeting_summary.md file."
-    ),
-    markdown=True,
-)
-
+# Agent 2: Synthesizes Action Items & Decisions Table
 summary_agent = Agent(
     name="Meeting Summary Agent",
     model=model,
     instructions=(
-        "You are a summarization assistant. "
-        "Generate a concise summary of the meeting, focusing on main topics, decisions, pricing ($10,000 charge, $2,000 build cost), "
-        "assigned tasks, and next steps. Format the summary for easy reading and quick reference.\n\n"
-        "Also mention: You can also see a quick summary on Slack and tasks on Linear.\n\n"
-        "Example summary:\n"
-        "# 📋 Meeting Summary\n"
-        "## 🎯 Main Topics\n"
-        "- Project goals and timeline\n"
-        "- Pricing strategy\n"
-        "- Technical stack\n\n"
-        "## 💡 Decisions\n"
-        "| Decision      | Details         |\n"
-        "|--------------|-----------------|\n"
-        "| Pricing       | $10,000 charge  |\n"
-        "| Build Cost    | $2,000          |\n"
-        "| Tech Stack    | Python, React   |\n\n"
-        "## 📝 Assigned Tasks\n"
-        "| Task           | Assignee | Deadline    |\n"
-        "|---------------|---------|-------------|\n"
-        "| Set up repo    | Alice   | 2025-09-20  |\n"
-        "| Draft proposal | Bob     | 2025-09-18  |\n\n"
-        "## 🚴‍♂️ Next Steps\n"
-        "- Schedule follow-up meeting\n"
-        "- Finalize requirements\n"
-        "- Confirm pricing with client\n\n"
-        "_You can also see a quick summary on Slack and tasks on Linear._"
+        "You are an executive summarization assistant. "
+        "Review the meeting details and produce a crisp executive report containing:\n"
+        "1. Executive Summary of key topics\n"
+        "2. Decisions Matrix (Decision vs Details table)\n"
+        "3. Assigned Tasks Matrix (Task, Owner/Assignee, Deadline table)\n"
+        "4. Next immediate steps."
     ),
     markdown=True,
 )
 
-meeting_transcription_task = Step(
-    name="Meeting Transcription Task",
-    agent=meeting_task_agent,
-)
-linear_task = Step(
-    name="Linear Task",
-    agent=linear_agent,
-)
-slack_notification_task = Step(
-    name="Slack Notification Task",
-    agent=slack_agent,
-)
-summary_task = Step(
-    name="Summary Task",
-    agent=summary_agent,
-)
-
-workflow = Workflow(
-    name="Enhanced Meeting Assistant Workflow",
-    steps=[
-        meeting_transcription_task,
-        Parallel(
-            slack_notification_task,
-            linear_task,
-            name="Notification Tasks",
-        ),
-        summary_task,
-    ],
-)
-
 if __name__ == "__main__":
-    workflow.print_response(
-        "Process the meeting notes: summarize, create Linear tasks, and send a Slack notification with key outcomes."
-    )
+    print("Starting Meeting Intelligence Agent...")
+    try:
+        print("\n--- Step 1: Processing Notes & Generating Summary ---")
+        step1_prompt = f"Analyze these notes and provide a structured summary:\n\n{notes_content}"
+        res1 = run_agent_with_retry(transcription_agent, step1_prompt)
+        
+        # Save summary to file
+        with open("meeting_summary.md", "w", encoding="utf-8") as f:
+            f.write(str(res1.content if hasattr(res1, "content") else res1))
+        print("Summary written to meeting_summary.md")
+        
+        print("\n--- Step 2: Executive Action Plan & Task Matrix ---")
+        step2_prompt = f"Review these notes and generate the decision/task matrices:\n\n{notes_content}"
+        res2 = run_agent_with_retry(summary_agent, step2_prompt)
+        
+        if hasattr(res2, "content"):
+            print(res2.content)
+        else:
+            print(res2)
+            
+    except Exception as e:
+        print(f"Execution stopped: {e}")
